@@ -1,0 +1,2165 @@
+---
+title: "MNLFA_prpf_04102025"
+output: html_document
+date: "2025-04-10"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+rm(list = ls())
+```
+
+# Load Packages
+
+```{r}
+library(ccpsyc)
+library(tidyverse)
+library(devtools)
+library(furniture)
+library(dplyr)
+#library(EFAtools)
+library(lavaan)
+#library(MplusAutomation)
+#library(ltm)
+library(readxl)
+library(semTools)
+#library(mnlfa)
+library(ddpcr)
+library(ggplot2)
+library(stringr)
+library(mice)
+library(ddpcr)
+library(caret)
+#library(metafor)
+```
+
+```{r}
+kre_all<-read_rds("kre_long.RDS")
+#kre_comp0<-read_rds("kre_wide.RDS")
+```
+
+
+
+
+```{r}
+kre_py <- kre_all %>% 
+  mutate(
+    # strip the “PRPF_y” prefix so Year is just 1-5
+    Year = sub("PRPF_y", "", Year),
+
+    # recode PRPF so 2 & 3 become “pT”, keep NA as “pNA”, everything else stays “p0” / “p1”
+    PRPF_lvl = case_when(
+      is.na(PRPF)       ~ "pNA",
+      PRPF %in% c(1, 2, 3) ~ "pT",
+      TRUE              ~ paste0("p", PRPF)
+    )
+  )
+
+kre_all %>%
+  dplyr::select(PRPF) %>% # checking the number of members in each PRPF group
+  table()
+```
+# Check for measurement invariance across years
+
+```{r}
+mitest_model<- '
+KRE =~ kre1 + kre2 + kre3 + kre4 + kre5 + kre6 + kre7 + kre8 + kre9 + kre10
+'
+constraints  <- c("loadings", "intercepts", "residuals", "lv.variances")
+lfree  <- c("intercepts", "residuals", "lv.variances")
+ifree  <- c("loadings", "residuals", "lv.variances")
+rfree  <- c("loadings", "intercepts", "lv.variances")
+vfree  <- c("loadings", "intercepts", "residuals")
+```
+
+
+```{r}
+scalar_fit <- lavaan::cfa(
+    mitest_model, data = kre_py, group = "Year",
+    group.equal = constraints,
+    std.lv = TRUE, estimator = "MLR", missing = "FIML")
+
+  lfree_fit <- lavaan::cfa(
+    mitest_model, data = kre_py, group = "Year",
+    group.equal = lfree,
+    std.lv = TRUE, estimator = "MLR", missing = "FIML")
+  
+  
+  ifree_fit <- lavaan::cfa(
+    mitest_model, data = kre_py, group = "Year",
+    group.equal = ifree,
+    std.lv = TRUE, estimator = "MLR", missing = "FIML")
+  
+  rfree_fit <- lavaan::cfa(
+    mitest_model, data = kre_py, group = "Year",
+    group.equal = rfree,
+    std.lv = TRUE, estimator = "MLR", missing = "FIML")
+  
+  vfree_fit <- lavaan::cfa(
+    mitest_model, data = kre_py, group = "Year",
+    group.equal = vfree,
+    std.lv = TRUE, estimator = "MLR", missing = "FIML")
+  
+```
+
+```{r}
+# Run ANOVA comparisons
+a1 <- anova(scalar_fit, lfree_fit)
+a2 <- anova(scalar_fit, ifree_fit)
+a3 <- anova(scalar_fit, rfree_fit)
+a4 <- anova(scalar_fit, vfree_fit)
+
+# Extract relevant values: Chi-square diff, df diff, p-value
+results <- data.frame(
+  Comparison = c("Intercepts Free", "Loadings Free", "Residuals Free", "Latent Variances Free"),
+  Chisq_Diff = c(a1$Chisq[2] - a1$Chisq[1],
+                 a2$Chisq[2] - a2$Chisq[1],
+                 a3$Chisq[2] - a3$Chisq[1],
+                 a4$Chisq[2] - a4$Chisq[1]),
+  Df_Diff = c(a1$Df[2] - a1$Df[1],
+              a2$Df[2] - a2$Df[1],
+              a3$Df[2] - a3$Df[1],
+              a4$Df[2] - a4$Df[1]),
+  P_value = c(a1$"Pr(>Chisq)"[2],
+              a2$"Pr(>Chisq)"[2],
+              a3$"Pr(>Chisq)"[2],
+              a4$"Pr(>Chisq)"[2])
+)
+
+# Round values for presentation
+results$Chisq_Diff <- round(results$Chisq_Diff, 2)
+results$P_value <- round(results$P_value, 4)
+
+results %>%
+  write.csv("mitests.csv")
+```
+
+```{r}
+# Get number of groups (Years)
+n_groups <- lavaan::lavInspect(lfree_fit, "ngroups")
+group_labels <- lavaan::lavInspect(lfree_fit, "group.label")
+
+# Extract loadings from lfree_fit by group
+loading_list <- list()
+
+for (g in 1:n_groups) {
+  loadings_g <- lavaan::parameterEstimates(lfree_fit, standardized = TRUE) %>%
+    dplyr::filter(op == "=~", group == g) %>%
+    dplyr::select(rhs, est) %>%
+    dplyr::mutate(Year = group_labels[g])
+  
+  loading_list[[g]] <- loadings_g
+}
+
+# Combine into a single dataframe
+loadings_long <- dplyr::bind_rows(loading_list) %>%
+  dplyr::rename(Indicator = rhs, Loading = est)
+
+# Ensure correct numeric order in legend
+loadings_long$Indicator <- factor(loadings_long$Indicator,
+                                  levels = paste0("kre", 1:10))
+
+# Plot with distinct linetypes and shapes for each indicator
+loading_plot<-ggplot(loadings_long, aes(x = Year, y = Loading,
+                          group = Indicator,
+                          linetype = Indicator,
+                          shape = Indicator,
+                          color = Indicator)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  labs(title = "Factor Loadings by Indicator Across Years",
+       x = "Year",
+       y = "Standardized Factor Loading") +
+  theme_minimal() +
+  theme(legend.position = "bottom",
+        legend.title = element_blank())
+```
+
+
+```{r}
+intercepts_list <- list()
+
+for (g in 1:n_groups) {
+  inter_g <- lavaan::parameterEstimates(ifree_fit, standardized = TRUE) %>%
+    dplyr::filter(op == "~1", group == g) %>%
+    dplyr::select(lhs, est) %>%
+    dplyr::mutate(Year = group_labels[g])
+  
+  intercepts_list[[g]] <- inter_g
+}
+
+intercepts_long <- dplyr::bind_rows(intercepts_list) %>%
+  dplyr::rename(Indicator = lhs, Intercept = est)
+
+intercepts_long$Indicator <- factor(intercepts_long$Indicator, levels = paste0("kre", 1:10))
+
+intercept_plot<-ggplot(intercepts_long, aes(x = Year, y = Intercept,
+                            group = Indicator,
+                            linetype = Indicator,
+                            shape = Indicator,
+                            color = Indicator)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  labs(title = "Intercepts by Indicator Across Years",
+       x = "Year",
+       y = "Intercept") +
+  scale_y_continuous(limits = c(2, 5)) +
+  theme_minimal() +
+  theme(legend.position = "bottom", legend.title = element_blank())
+
+```
+
+```{r}
+resid_list <- list()
+
+for (g in 1:n_groups) {
+  resid_g <- lavaan::parameterEstimates(rfree_fit, standardized = TRUE) %>%
+    dplyr::filter(op == "~~", lhs == rhs, grepl("kre", lhs), group == g) %>%
+    dplyr::select(lhs, est) %>%
+    dplyr::mutate(Year = group_labels[g])
+  
+  resid_list[[g]] <- resid_g
+}
+
+resid_long <- dplyr::bind_rows(resid_list) %>%
+  dplyr::rename(Indicator = lhs, Residual = est)
+
+resid_long$Indicator <- factor(resid_long$Indicator, levels = paste0("kre", 1:10))
+
+resid_plot<-ggplot(resid_long, aes(x = Year, y = Residual,
+                       group = Indicator,
+                       linetype = Indicator,
+                       shape = Indicator,
+                       color = Indicator)) +
+  geom_line(linewidth = 1.2) +
+  geom_point(size = 3) +
+  labs(title = "Residual Variances by Indicator Across Years",
+       x = "Year",
+       y = "Residual Variance") +
+  theme_minimal() +
+  theme(legend.position = "bottom", legend.title = element_blank())
+
+```
+
+
+```{r}
+ggsave("loadings_plot.png", plot = loading_plot, width = 7, height = 5, dpi = 300)
+ggsave("intercepts_plot.png", plot = intercept_plot, width = 7, height = 5, dpi = 300)
+ggsave("residuals_plot.png", plot = resid_plot, width = 7, height = 5, dpi = 300)
+```
+
+
+```{r}
+#use avg_est for year, meta_est for prpf, int_meta_est for addition, int_avg_est for multiplication
+
+focal_param_DIF3 <- function(
+  item_nmbr    = 1,            # e.g. 1 
+  item_lbl     = "kre",
+  comb_var1    = "Year",
+  comb_var2    = "PRPF_lvl",
+  drop_lvls    = 20, # a category group below 20 members will be dropped
+  regexp_e     = "^[0-9]+",
+  regexp_r     = "^[0-9]+\\.",
+  latent_var   = "KRE",
+  constraints  = c("loadings", "intercepts", "residuals", "lv.variances"),
+  free_param   = c("intercept", "loading", "residual", "lv.var"),
+  std.lv       = TRUE,
+  estimator    = "MLR",
+  missing      = "FIML",
+  nonrefvect   = NULL ,
+  refgroup     = NULL,
+  measurement_model = NULL #The user can pass their cfa model as this argument
+) {
+
+  free_param <- match.arg(free_param) # check for which parameters to free up, by default all of them are but the constraints argument changes that
+  focal_item <- paste0(item_lbl, item_nmbr) # make it more generalizable in future iterations
+
+  # 0 ─ Create the interaction grouping (Year × PRPF_lvl), filter out small cells ----
+  data <- data %>%
+    mutate(
+      group_var = interaction(.data[[comb_var1]],
+                              .data[[comb_var2]],
+                              sep = ".",    # e.g. "1.p0", "2.p1", …
+                              drop = TRUE)
+    ) %>%
+    add_count(group_var, name = "grp_n") %>%
+    filter(grp_n >= drop_lvls) %>%
+    dplyr::select(-grp_n) %>%
+    mutate(group_var = forcats::fct_drop(group_var))
+
+  # 1 ─ Build a one‐factor template if none supplied --------------------------------
+  if (is.null(measurement_model)) {
+    items <- paste0(item_lbl, 1:10, collapse = " + ")
+    measurement_model <- sprintf("%s =~ %s", latent_var, items)
+  }
+
+  # 2 ─ Translate free_param into group.partial -------------------------------------
+  group_partial <- switch(
+    free_param,
+    intercept = sprintf("%s ~ 1", focal_item),
+    loading   = sprintf("%s =~ %s", latent_var, focal_item),
+    residual  = sprintf("%s ~~ %s", focal_item, focal_item),
+    lv.var    = sprintf("%s ~~ %s", latent_var, latent_var)
+  )
+
+  if (free_param == "lv.var" && std.lv) {
+    warning("Freeing latent variances requires std.lv = FALSE; changing it.")
+    std.lv <- FALSE
+  }
+
+  # 3 ─ Fit scalar (fully constrained) and partial‐invariance models on the interaction ---
+  scalar_fit <- lavaan::cfa(
+    measurement_model, data = data, group = "group_var",
+    group.equal = constraints,
+    std.lv = std.lv, estimator = estimator, missing = missing
+  )
+
+  partial_fit <- lavaan::cfa(
+    measurement_model, data = data, group = "group_var",
+    group.equal = constraints, group.partial = group_partial,
+    std.lv = std.lv, estimator = estimator, missing = missing
+  )
+
+  # 4 ─ Satorra‐Bentler χ² diff test -------------------------------------------
+  lrt <- lavaan::lavTestLRT(scalar_fit, partial_fit)
+
+  # 5 ─ Helper to grab the focal row from parameterEstimates() -------------------
+  grab_row <- function(fit) { #get the freed up parameter estimates
+    pe <- lavaan::parameterEstimates(fit, standardized = FALSE)
+    dplyr::filter(
+      pe,
+      (free_param == "intercept" & lhs == focal_item & op == "~1") |
+      (free_param == "loading"   & lhs == latent_var  & op == "=~" & rhs == focal_item) |
+      (free_param == "residual"  & lhs == focal_item & op == "~~" & rhs == focal_item) |
+      (free_param == "lv.var"    & lhs == latent_var  & op == "~~" & rhs == latent_var)
+    )
+  }
+
+  tsum <- summary(partial_fit)
+  ssum <- summary(scalar_fit)
+
+  est_part <- grab_row(partial_fit)
+  est_scal <- grab_row(scalar_fit)
+
+  # Attach the group‐labels to each row
+  est_part$label  <- tsum$data$group.label
+  est_scal$label  <- ssum$data$group.label
+
+  # 6 ─ Rename‐group function: if poolvar == comb_var1, extract Year;
+  #    if poolvar == comb_var2, extract PRPF; otherwise keep label “as is.”
+  rename_group <- function(est_df, poolvar) {
+    if (poolvar == comb_var1) {
+      est_df <- est_df %>%
+        mutate(pvar = stringr::str_extract(label, regexp_e))
+    } else if (poolvar == comb_var2) {
+      est_df <- est_df %>%
+        mutate(pvar = stringr::str_replace(label, regexp_r, ""))
+    } else {
+      # “poolvar == interaction”: keep the full label (e.g. "1.p0") as pvar
+      est_df <- est_df %>%
+        mutate(pvar = label)
+    }
+    est_df
+  }
+
+  # 7 ─ Compute a pooled summary given est vs. reference (est_scal) -------------
+  ref_compare <- function(est_df, est_scal_df, poolvar) {
+    est2 <- rename_group(est_df, poolvar)
+    est2 <- dplyr::bind_cols(
+      label = rep(focal_item, length(est2$pvar)),
+      group = est2$pvar,
+      est   = est2$est,     se   = est2$se,
+      cil   = est2$ci.lower, ciu = est2$ci.upper,
+      estr  = est_scal_df$est[1:length(est2$pvar)],
+      ser   = est_scal_df$se[1:length(est2$pvar)],
+      cilr  = est_scal_df$ci.lower[1:length(est2$pvar)],
+      ciur  = est_scal_df$ci.upper[1:length(est2$pvar)]
+    ) %>%
+      mutate(
+        diff    = est - estr,
+        diff_se = sqrt(se^2 + ser^2),
+        weight  = 1 / diff_se^2
+      ) %>%
+      group_by(group) %>%
+      summarise(
+        diff     = weighted.mean(diff, weight),
+        est      = weighted.mean(est, weight),
+        weight   = mean(weight),
+        se       = sqrt(1 / sum(weight)),
+        z        = est / se,
+        pvalue   = 2 * pnorm(-abs(z)),
+        ci.lower = est - qnorm(0.975) * se,
+        ci.upper = est + qnorm(0.975) * se,
+        .groups  = "drop"
+      )
+    est2  # return the per‐group summary
+  }
+
+  # 8 ─ From the “reference‐comparison” table, create pairwise and pooled stats ---
+   # ── A: exactly your old “pooled + pairwise + avg” logic ─────────────────
+# ── 1) Default pooling (Year OR PRPF) ────────────────────────────────────
+# ── 1) Default pooling (Year OR PRPF) ────────────────────────────────────
+pool_default <- function(ref_df, poolvar) {
+  # —— PRPF case: compare p0 & pT vs pNA —————————————————————
+  # —— YEAR case (old logic): original pooled + avg_change —————————————————
+  # meta‐analytic pooling over years
+  meta_est <- with(ref_df, sum(weight * diff) / sum(weight))
+  meta_se  <- sqrt(1 / sum(ref_df$weight))
+  meta_z   <- meta_est / meta_se
+  meta_p   <- 2 * pnorm(-abs(meta_z))
+
+  # compute simple average‐per‐year slope from pairwise, 
+  G       <- nrow(ref_df)
+  est_mat <- outer(ref_df$est, ref_df$est, `-`)
+  se_mat  <- sqrt(outer(ref_df$se^2, ref_df$se^2, `+`))
+  gap     <- outer(seq_len(G), seq_len(G), `-`)
+  idx     <- upper.tri(est_mat)
+
+  diffs   <- est_mat[idx] / gap[idx]
+  ses     <- se_mat[idx]  / gap[idx]
+  wts     <- 1 / ses^2
+
+  avg_est <- sum(wts * diffs) / sum(wts)
+  avg_se  <- sqrt(1 / sum(wts))
+  avg_z   <- avg_est / avg_se
+  avg_p   <- 2 * pnorm(-abs(avg_z))
+
+ #pNA indicates the participant was not interviewed
+  #p0 and pT are the participants that were interview
+  # p0 and pT are kept as separate groups to retain variance information for those subgroups
+if (poolvar == comb_var2) {
+    base   <- ref_df %>% filter(group == "pNA")
+    others <- ref_df %>% filter(group %in% c("p0","pT"))}else if(poolvar == comb_var1){
+    base   <- ref_df %>% filter(group == "1")
+    others <- ref_df %>% filter(group %in% c("2","3","4", "5"))
+    }else{
+    base   <- ref_df %>% filter(group == refgroup)
+    others <- ref_df %>% filter(group %in% nonrefvect)
+    }
+
+    diffd    <- others$diff - base$diff
+    sesd      <- sqrt(others$se^2 + base$se^2)
+    meta_wd  <- 1 / sesd^2
+
+    # meta‐analytic pooled diff, use meta_estd for prpf
+    meta_estd <- sum(diffd * meta_wd) / sum(meta_wd)
+    meta_sed  <- sqrt(1 / sum(meta_wd))
+    meta_zd   <- meta_estd / meta_sed
+    meta_pd   <- 2 * pnorm(-abs(meta_zd))
+
+    # simple average diff
+    avg_estd  <- mean(diffd)
+    avg_sed   <- sqrt(sum(sesd^2)) / length(sesd)
+    avg_zd    <- avg_estd / avg_sed
+    avg_pd    <- 2 * pnorm(-abs(avg_zd))
+list(
+    group_labels   = ref_df$group,
+
+    # meta‐analytic
+    meta_est       = meta_est,
+    meta_se        = meta_se,
+    meta_z         = meta_z,
+    meta_p         = meta_p,
+
+    # simple‐average
+    avg_est        = avg_est,
+    avg_se         = avg_se,
+    avg_z          = avg_z,
+    avg_p          = avg_p,
+    
+    meta_estd = meta_estd, meta_sed = meta_sed, meta_zd = meta_zd, meta_pd = meta_pd,
+      avg_estd  = avg_estd,  avg_sed  = avg_sed,  avg_zd  = avg_zd,  avg_pd  = avg_pd
+  )
+    
+
+}
+
+
+
+# ── 2) Interaction pooling (Year×PRPF → p0/pT vs pNA) ───────────────────
+pool_interaction <- function(ref_df_inter) {
+  # 1) expand to year & prpf
+  df_full <- ref_df_inter %>%
+    mutate(
+      year = as.integer(stringr::str_extract(group, regexp_e)),
+      prpf = stringr::str_replace(group, regexp_r, "")
+    )
+
+  # 2) PRPF‐level pooled & avg slopes
+  prpf_df <- df_full %>%
+    group_by(prpf) %>%
+    arrange(year) %>%
+    summarise(
+      diff_pool = sum(weight * diff) / sum(weight),
+      se_pool   = sqrt(1 / sum(weight)),
+      avg_pool  = {
+        idx <- which(upper.tri(outer(year,year,`-`)))
+        D   <- outer(est, est, `-`)[idx] / outer(year,year,`-`)[idx]
+        S   <- sqrt(outer(se^2, se^2, `+`))[idx] / outer(year,year,`-`)[idx]
+        w   <- 1 / S^2
+        sum(w * D) / sum(w)
+      },
+      se_avg    = {
+        idx <- which(upper.tri(outer(year,year,`-`)))
+        S   <- sqrt(outer(se^2, se^2, `+`))[idx] / outer(year,year,`-`)[idx]
+        w   <- 1 / S^2
+        sqrt(1 / sum(w))
+      },
+      .groups="drop"
+    )
+
+  # 3) OVERALL meta‐analytic & simple‐average across all three PRPF levels, meta_est for interaction
+  w_all   <- 1 / prpf_df$se_pool^2
+  meta_est<- sum(prpf_df$diff_pool * w_all) / sum(w_all)
+  meta_se <- sqrt(1 / sum(w_all))
+  meta_z  <- meta_est / meta_se
+  meta_p  <- 2 * pnorm(-abs(meta_z))
+
+  avg_est <- mean(prpf_df$avg_pool)
+  avg_se  <- sqrt(sum(prpf_df$se_avg^2)) / nrow(prpf_df)
+  avg_z   <- avg_est / avg_se
+  avg_p   <- 2 * pnorm(-abs(avg_z))
+
+  # 4) DIFFS vs pNA for the two non-baseline levels
+  ref_pna <- prpf_df %>% filter(prpf == "pNA")
+  others  <- prpf_df %>% filter(prpf %in% c("p0","pT")) %>%
+    mutate(
+      diff_meta = diff_pool - ref_pna$diff_pool,
+      se_meta   = sqrt(se_pool^2    + ref_pna$se_pool^2),
+
+      diff_avg  = avg_pool  - ref_pna$avg_pool,
+      se_avgd   = sqrt(se_avg^2      + ref_pna$se_avg^2)
+    )
+
+  # 5) meta-analytic & simple-average of those two diffs vs pNA
+  w_meta   <- 1 / others$se_meta^2
+  meta_estd<- sum(others$diff_meta * w_meta) / sum(w_meta)
+  meta_sed <- sqrt(1 / sum(w_meta))
+  meta_zd  <- meta_estd / meta_sed
+  meta_pd  <- 2 * pnorm(-abs(meta_zd))
+
+  avg_estd <- mean(others$diff_avg)
+  avg_sed  <- sqrt(sum(others$se_avgd^2)) / nrow(others)
+  avg_zd   <- avg_estd / avg_sed
+  avg_pd   <- 2 * pnorm(-abs(avg_zd))
+
+  # 6) return all four pairs
+  list(
+    meta_est    = meta_est,
+    meta_se     = meta_se,
+    meta_z      = meta_z,
+    meta_p      = meta_p,
+
+    avg_est     = avg_est,
+    avg_se      = avg_se,
+    avg_z       = avg_z,
+    avg_p       = avg_p,
+
+    meta_estd   = meta_estd,
+    meta_sed    = meta_sed,
+    meta_zd     = meta_zd,
+    meta_pd     = meta_pd,
+
+    avg_estd    = avg_estd,
+    avg_sed     = avg_sed,
+    avg_zd      = avg_zd,
+    avg_pd      = avg_pd
+  )
+}
+
+
+
+  
+  
+  
+  #— quick debug inside focal_param_DIF3() —
+ref_int<-ref_compare(est_part, est_scal, "interaction")
+                   # should be one row per Year×PRPF
+pool_int <- print(pool_interaction(ref_int))  # should be one row per PRPF with both pooled_* and avg_change_*
+#— end debug —
+
+call_all <- function(est_df, poolvar, est_scal_df) {
+  # **Build** the ref‐table for this poolvar
+  ref_df <- ref_compare(est_df, est_scal_df, poolvar)
+
+  if (poolvar == "interaction") {
+    complete_df <- pool_interaction(ref_df)
+  } else {
+    complete_df <- pool_default(ref_df, poolvar)
+  }
+
+  complete_df$label <- focal_item
+  complete_df
+}
+
+    # 10 ─ Now compute pooled‐DIF for:
+  #       • comb_var1 (“Year”),
+  #       • comb_var2 (“PRPF_lvl”),
+  #       • “interaction” (i.e. each unique group_var like “1.p0”)
+var1_results <- call_all(est_part, comb_var1, est_scal)
+var2_results <- call_all(est_part, comb_var2, est_scal)
+var3_results <- call_all(est_part, "interaction", est_scal)
+
+  # 11 ─ Return a named list, including LRT and all three pooled‐DIF objects -------
+  list(
+    scalar_fit        = scalar_fit,
+    partial_fit       = partial_fit,
+    reff              = reff_df,
+    LRT               = lrt,
+    pooled_stats      = list(
+      label           = focal_item,
+      pooled_var1     = var1_results,
+      pooled_var2     = var2_results,
+      pooled_interaction = var3_results,
+      chsq            = lrt$`Chisq diff`[2],
+      chsq_dof        = lrt$`Df diff`[2],
+      chsq_pval       = lrt$`Pr(>Chisq)`[2]
+    )
+  )
+}
+
+
+
+
+
+
+
+```
+
+
+
+```{r}
+
+focal_param_DIF <- function(
+  data,
+  item_nmbr,            # e.g. 1
+  item_lbl = "kre",
+  group_var,
+  latent_var    = "KRE",
+  constraints   = c("loadings", "intercepts",
+                    "residuals", "lv.variances"),
+  free_param    = c("intercept", "loading", "residual", "lv.var"), # add functionality to free up more than one parameter
+  std.lv        = TRUE,
+  estimator     = "MLR",
+  missing       = "FIML",
+  measurement_model = NULL
+){
+
+  free_param  <- match.arg(free_param)
+  focal_item  <- paste0(item_lbl, item_nmbr, collapse = "")
+
+  ## 0 ─ one-factor template if user didn’t supply model -------------
+  if (is.null(measurement_model)) {
+    items <- paste0(item_lbl, 1:10, collapse = " + ")
+    measurement_model <- sprintf("%s =~ %s", latent_var, items)
+  }
+
+  ## 1 ─ translate free_param into group.partial string -------------
+  group_partial <- switch(
+    free_param,
+    intercept = sprintf("%s ~ 1", focal_item), # "kre1 ~ 1"
+    loading   = sprintf("%s =~ %s", latent_var, focal_item),
+    residual  = sprintf("%s ~~ %s", focal_item, focal_item),
+    lv.var    = sprintf("%s ~~ %s", latent_var, latent_var)
+  )
+
+  if (free_param == "lv.var" && std.lv) {
+    warning("Freeing latent variances requires std.lv = FALSE; changing it.")
+    std.lv <- FALSE
+  }
+
+  ## 2 ─ fit the two models ----------------------------------------
+  scalar_fit <- lavaan::cfa(
+    measurement_model, data = data, group = group_var,
+    group.equal = constraints,
+    std.lv = std.lv, estimator = estimator, missing = missing)
+
+  partial_fit <- lavaan::cfa(
+    measurement_model, data = data, group = group_var,
+    group.equal = constraints, group.partial = group_partial,
+    std.lv = std.lv, estimator = estimator, missing = missing)
+
+  ## 3 ─ S-B χ² diff test ------------------------------------------
+  lrt <- lavaan::lavTestLRT(scalar_fit, partial_fit)
+
+  ## helper to grab focal rows -------------------------------------
+  grab_row <- function(fit) {
+    pe <- lavaan::parameterEstimates(fit, standardized = FALSE)
+    dplyr::filter(
+      pe,
+      (free_param == "intercept" & lhs == focal_item & op == "~1") |
+      (free_param == "loading"   & lhs == latent_var & op == "=~" & rhs == focal_item) |
+      (free_param == "residual"  & lhs == focal_item & op == "~~" & rhs == focal_item) |
+      (free_param == "lv.var"    & lhs == latent_var & op == "~~" & rhs == latent_var)
+    )
+  }
+
+  est_part <- grab_row(partial_fit)
+  est_scal <- grab_row(scalar_fit)
+
+  ## 4 ─ original “reference” comparison ---------------------------
+  compare_df <- dplyr::bind_cols(
+    label = est_part$lhs,
+    group = est_part$group,
+    est   = est_part$est,        se   = est_part$se,
+    cil   = est_part$ci.lower,   ciu  = est_part$ci.upper,
+    estr  = est_scal$est,        ser  = est_scal$se,
+    cilr  = est_scal$ci.lower,   ciur = est_scal$ci.upper
+  ) |>
+    dplyr::mutate(
+      diff    = est - estr,
+      diff_se = sqrt(se^2 + ser^2),      # conservative
+      weight  = 1 / diff_se^2
+    )
+
+  ## 5 ─ pooled reference test ------------------------------------
+  pooled_est <- with(compare_df, sum(weight * diff) / sum(weight))
+  pooled_se  <- sqrt(1 / sum(compare_df$weight))
+  z_stat     <- pooled_est / pooled_se
+  p_value    <- 2 * pnorm(-abs(z_stat))
+
+  ## ────────────────────────────────────────────────────────────────
+  ## 6 ─  NEW: all year-to-year contrasts, scaled per elapsed years
+  ## ────────────────────────────────────────────────────────────────
+  groups <- compare_df$group                        # numeric, 1 … G
+  G      <- length(groups)
+
+  # matrices of estimates & SEs so we can vectorise
+  est_mat <- outer(compare_df$est, compare_df$est,  `-`)         # g_j − g_i
+  se_mat  <- sqrt(outer(compare_df$se^2, compare_df$se^2, `+`))   # √(se_i²+se_j²)
+  yr_gap  <- outer(groups, groups, `-`)                           # j − i
+
+  # keep only j>i (upper-triangular), drop 0 gaps
+  keep <- upper.tri(est_mat)
+
+  pairwise_df <- tibble::tibble(
+    grp_hi         = groups[col(est_mat)[keep]],
+    grp_lo         = groups[row(est_mat)[keep]],
+    years_between  = yr_gap  [keep],
+    diff_scaled    = est_mat[keep] / years_between,
+    se_scaled      = se_mat [keep] / years_between
+  ) |>
+    dplyr::mutate(
+      z = diff_scaled / se_scaled,
+      p = 2 * pnorm(-abs(z))
+    )
+
+  ## pooled average per-year change --------------------------------
+  w_pair             <- 1 / pairwise_df$se_scaled^2
+  avg_change_est     <- sum(w_pair * pairwise_df$diff_scaled) / sum(w_pair)
+  avg_change_se      <- sqrt(1 / sum(w_pair))
+  avg_change_z       <- avg_change_est / avg_change_se
+  avg_change_p       <- 2 * pnorm(-abs(avg_change_z))
+
+  ## 7 ─ return ----------------------------------------------------
+list(
+  scalar_fit   = scalar_fit,
+  partial_fit  = partial_fit,
+  LRT          = lrt,
+  compare_df   = compare_df,
+  pairwise_df  = pairwise_df,
+  pooled_stats = c(
+    label       = focal_item,
+    est.ref     = pooled_est,
+    se.ref      = pooled_se,
+    z.ref       = z_stat,
+    p.ref       = p_value,
+    chsq        = lrt$`Chisq diff`[2],
+    chsq_dof    = lrt$`Df diff`[2],
+    chsq_pval   = lrt$`Pr(>Chisq)`[2],
+    est.linear  = avg_change_est,
+    se.linear   = avg_change_se,
+    z.linear    = avg_change_z,
+    p.linear    = avg_change_p
+  )
+)
+
+
+  }
+```
+
+
+
+
+
+
+```{r}
+kre_int_yr <- setNames(vector("list", 10), paste0("kre", 1:10, "_int_yr"))
+
+for (i in 1:10) { #for (i in c(6,8,12)) {
+  kre_int_yr[[i]] <- focal_param_DIF(
+    data       = kre_all, # 
+    group_var  = "Year", # interview variable "survey"
+    item_lbl   = "kre", # name your item y3ga
+    item_nmbr  = i, # e.g., 6, 8, 12
+    free_param = "intercept")
+}
+
+kre_intercept_year_df <- do.call(
+  rbind,
+  lapply(kre_int_yr, function(x) as.data.frame(t(x$pooled_stats)))
+)
+rownames(kre_intercept_year_df) <- NULL   # drop row-names if you like
+
+```
+
+
+
+```{r}
+kre_load_yr <- setNames(vector("list", 10), paste0("kre", 1:10, "_load_yr"))
+
+for (i in 1:10) {
+  kre_load_yr[[i]] <- focal_param_DIF(
+    data       = kre_all,
+    group_var  = "Year",
+    item_lbl   = "kre",
+    item_nmbr  = i,
+    free_param = "loading")
+}
+
+kre_load_year_df <- do.call(
+  rbind,
+  lapply(kre_load_yr, function(x) as.data.frame(t(x$pooled_stats)))
+)
+rownames(kre_load_year_df) <- NULL   # drop row-names if you like
+  
+```
+
+```{r}
+kre_resid_yr <- setNames(vector("list", 10), paste0("kre", 1:10, "_resid_yr"))
+
+for (i in 1:10) {
+  kre_resid_yr[[i]] <- focal_param_DIF(
+    data       = kre_all,
+    group_var  = "Year",
+    item_lbl   = "kre",
+    item_nmbr  = i,
+    free_param = "residual")
+}
+
+kre_resid_year_df <- do.call(
+  rbind,
+  lapply(kre_resid_yr, function(x) as.data.frame(t(x$pooled_stats)))
+)
+rownames(kre_resid_year_df) <- NULL   # drop row-names if you like
+  
+```
+
+
+```{r}
+
+
+# Run DIF for kre1 through kre10 and store results neatly
+kre_int_prpf <- lapply(1:10, function(i) {
+  focal_param_DIF3(
+    data       = kre_py,
+    comb_var1  = "Year",
+    comb_var2  = "PRPF_lvl",
+    item_lbl   = "kre",
+    item_nmbr  = i,
+    free_param = "intercept"
+  )
+})
+
+
+
+kre_int_py_results <- do.call(rbind, lapply(kre_int_prpf, function(x) {
+  data.frame(
+    label = x$pooled_stats$label,
+
+    # ── Year (comb_var1) ──────────────────────────────
+    var1_meta_est    = round(x$pooled_stats$pooled_var1$meta_est,    3),
+    var1_meta_se     = round(x$pooled_stats$pooled_var1$meta_se,     3),
+    var1_meta_p     = round(x$pooled_stats$pooled_var1$meta_p,     3),
+    var1_avg_est     = round(x$pooled_stats$pooled_var1$avg_est,     3),
+    var1_avg_se      = round(x$pooled_stats$pooled_var1$avg_se,      3),
+    var1_avg_p      = round(x$pooled_stats$pooled_var1$avg_p,      3),
+    var1_meta_estd   = round(x$pooled_stats$pooled_var1$meta_estd,   3),
+    var1_meta_sed    = round(x$pooled_stats$pooled_var1$meta_sed,    3),
+    var1_meta_pd    = round(x$pooled_stats$pooled_var1$meta_pd,    3),
+    var1_avg_estd    = round(x$pooled_stats$pooled_var1$avg_estd,    3),
+    var1_avg_sed     = round(x$pooled_stats$pooled_var1$avg_sed,     3),
+    var1_avg_pd     = round(x$pooled_stats$pooled_var1$avg_pd,     3),
+
+    # ── PRPF_lvl (comb_var2) ─────────────────────────
+    var2_meta_est    = round(x$pooled_stats$pooled_var2$meta_est,    3),
+    var2_meta_se     = round(x$pooled_stats$pooled_var2$meta_se,     3),
+    var2_meta_p     = round(x$pooled_stats$pooled_var2$meta_p,     3),
+    var2_avg_est     = round(x$pooled_stats$pooled_var2$avg_est,     3),
+    var2_avg_se      = round(x$pooled_stats$pooled_var2$avg_se,      3),
+    var2_avg_p      = round(x$pooled_stats$pooled_var2$avg_p,      3),
+    var2_meta_estd   = round(x$pooled_stats$pooled_var2$meta_estd,   3),
+    var2_meta_sed    = round(x$pooled_stats$pooled_var2$meta_sed,    3),
+    var2_meta_pd    = round(x$pooled_stats$pooled_var2$meta_pd,    3),
+    var2_avg_estd    = round(x$pooled_stats$pooled_var2$avg_estd,    3),
+    var2_avg_sed     = round(x$pooled_stats$pooled_var2$avg_sed,     3),
+    var2_avg_pd     = round(x$pooled_stats$pooled_var2$avg_pd,     3),
+
+    # ── Interaction (Year × PRPF_lvl) ────────────────
+    int_meta_est    = round(x$pooled_stats$pooled_interaction$meta_est,   3),
+    int_meta_se     = round(x$pooled_stats$pooled_interaction$meta_se,    3),
+    int_meta_p     = round(x$pooled_stats$pooled_interaction$meta_p,    3),
+    int_avg_est     = round(x$pooled_stats$pooled_interaction$avg_est,    3),
+    int_avg_se      = round(x$pooled_stats$pooled_interaction$avg_se,     3),
+    int_avg_p      = round(x$pooled_stats$pooled_interaction$avg_p,     3),
+    int_meta_estd   = round(x$pooled_stats$pooled_interaction$meta_estd,  3),
+    int_meta_sed    = round(x$pooled_stats$pooled_interaction$meta_sed,   3),
+    int_meta_pd    = round(x$pooled_stats$pooled_interaction$meta_pd,   3),
+    int_avg_estd    = round(x$pooled_stats$pooled_interaction$avg_estd,   3),
+    int_avg_sed     = round(x$pooled_stats$pooled_interaction$avg_sed,    3),
+    int_avg_pd     = round(x$pooled_stats$pooled_interaction$avg_pd,    3),
+
+    # ── chisq on partial vs. scalar ─────────────────
+    chisq    = round(x$pooled_stats$chsq,    3),
+    chisq_df =        x$pooled_stats$chsq_dof,
+    chisq_p  = round(x$pooled_stats$chsq_pval,3)
+  )
+}))
+
+# Run DIF for kre1 through kre10 and store results neatly
+kre_load_prpf <- lapply(1:10, function(i) {
+  focal_param_DIF3(
+    data       = kre_py,
+    comb_var1  = "Year",
+    comb_var2  = "PRPF_lvl",
+    item_lbl   = "kre",
+    item_nmbr  = i,
+    free_param = "loading"
+  )
+})
+
+kre_load_py_results <- do.call(rbind, lapply(kre_load_prpf, function(x) {
+  data.frame(
+    label = x$pooled_stats$label,
+
+    # ── Year (comb_var1) ──────────────────────────────
+    var1_meta_est    = round(x$pooled_stats$pooled_var1$meta_est,    3),
+    var1_meta_se     = round(x$pooled_stats$pooled_var1$meta_se,     3),
+    var1_meta_p     = round(x$pooled_stats$pooled_var1$meta_p,     3),
+    var1_avg_est     = round(x$pooled_stats$pooled_var1$avg_est,     3),
+    var1_avg_se      = round(x$pooled_stats$pooled_var1$avg_se,      3),
+    var1_avg_p      = round(x$pooled_stats$pooled_var1$avg_p,      3),
+    var1_meta_estd   = round(x$pooled_stats$pooled_var1$meta_estd,   3),
+    var1_meta_sed    = round(x$pooled_stats$pooled_var1$meta_sed,    3),
+    var1_meta_pd    = round(x$pooled_stats$pooled_var1$meta_pd,    3),
+    var1_avg_estd    = round(x$pooled_stats$pooled_var1$avg_estd,    3),
+    var1_avg_sed     = round(x$pooled_stats$pooled_var1$avg_sed,     3),
+    var1_avg_pd     = round(x$pooled_stats$pooled_var1$avg_pd,     3),
+
+    # ── PRPF_lvl (comb_var2) ─────────────────────────
+    var2_meta_est    = round(x$pooled_stats$pooled_var2$meta_est,    3),
+    var2_meta_se     = round(x$pooled_stats$pooled_var2$meta_se,     3),
+    var2_meta_p     = round(x$pooled_stats$pooled_var2$meta_p,     3),
+    var2_avg_est     = round(x$pooled_stats$pooled_var2$avg_est,     3),
+    var2_avg_se      = round(x$pooled_stats$pooled_var2$avg_se,      3),
+    var2_avg_p      = round(x$pooled_stats$pooled_var2$avg_p,      3),
+    var2_meta_estd   = round(x$pooled_stats$pooled_var2$meta_estd,   3),
+    var2_meta_sed    = round(x$pooled_stats$pooled_var2$meta_sed,    3),
+    var2_meta_pd    = round(x$pooled_stats$pooled_var2$meta_pd,    3),
+    var2_avg_estd    = round(x$pooled_stats$pooled_var2$avg_estd,    3),
+    var2_avg_sed     = round(x$pooled_stats$pooled_var2$avg_sed,     3),
+    var2_avg_pd     = round(x$pooled_stats$pooled_var2$avg_pd,     3),
+
+    # ── Interaction (Year × PRPF_lvl) ────────────────
+    int_meta_est    = round(x$pooled_stats$pooled_interaction$meta_est,   3),
+    int_meta_se     = round(x$pooled_stats$pooled_interaction$meta_se,    3),
+    int_meta_p     = round(x$pooled_stats$pooled_interaction$meta_p,    3),
+    int_avg_est     = round(x$pooled_stats$pooled_interaction$avg_est,    3),
+    int_avg_se      = round(x$pooled_stats$pooled_interaction$avg_se,     3),
+    int_avg_p      = round(x$pooled_stats$pooled_interaction$avg_p,     3),
+    int_meta_estd   = round(x$pooled_stats$pooled_interaction$meta_estd,  3),
+    int_meta_sed    = round(x$pooled_stats$pooled_interaction$meta_sed,   3),
+    int_meta_pd    = round(x$pooled_stats$pooled_interaction$meta_pd,   3),
+    int_avg_estd    = round(x$pooled_stats$pooled_interaction$avg_estd,   3),
+    int_avg_sed     = round(x$pooled_stats$pooled_interaction$avg_sed,    3),
+    int_avg_pd     = round(x$pooled_stats$pooled_interaction$avg_pd,    3),
+
+    # ── chisq on partial vs. scalar ─────────────────
+    chisq    = round(x$pooled_stats$chsq,    3),
+    chisq_df =        x$pooled_stats$chsq_dof,
+    chisq_p  = round(x$pooled_stats$chsq_pval,3)
+  )
+}))
+
+#colnames(kre_int_py_results)<-c("item", "year_est", "year_se", "year_p","prpf_est", "prpf_se", "prpf_p", "Chi_sq", "df", "Chi.pval")
+
+#colnames(kre_load_py_results)<-c("item", "year_est", "year_se", "year_p","prpf_est", "prpf_se", "prpf_p", "Chi_sq", "df", "Chi.pval")
+
+
+
+kre_resid_prpf <- lapply(1:10, function(i) {
+  focal_param_DIF3(
+    data       = kre_py,
+    comb_var1  = "Year",
+    comb_var2  = "PRPF_lvl",
+    item_lbl   = "kre",
+    item_nmbr  = i,
+    free_param = "residual"
+  )
+})
+
+kre_resid_py_results <- do.call(rbind, lapply(kre_resid_prpf, function(x) {
+  data.frame(
+    label = x$pooled_stats$label,
+
+    # ── Year (comb_var1) ──────────────────────────────
+    var1_meta_est    = round(x$pooled_stats$pooled_var1$meta_est,    3),
+    var1_meta_se     = round(x$pooled_stats$pooled_var1$meta_se,     3),
+    var1_meta_p     = round(x$pooled_stats$pooled_var1$meta_p,     3),
+    var1_avg_est     = round(x$pooled_stats$pooled_var1$avg_est,     3),
+    var1_avg_se      = round(x$pooled_stats$pooled_var1$avg_se,      3),
+    var1_avg_p      = round(x$pooled_stats$pooled_var1$avg_p,      3),
+    var1_meta_estd   = round(x$pooled_stats$pooled_var1$meta_estd,   3),
+    var1_meta_sed    = round(x$pooled_stats$pooled_var1$meta_sed,    3),
+    var1_meta_pd    = round(x$pooled_stats$pooled_var1$meta_pd,    3),
+    var1_avg_estd    = round(x$pooled_stats$pooled_var1$avg_estd,    3),
+    var1_avg_sed     = round(x$pooled_stats$pooled_var1$avg_sed,     3),
+    var1_avg_pd     = round(x$pooled_stats$pooled_var1$avg_pd,     3),
+
+    # ── PRPF_lvl (comb_var2) ─────────────────────────
+    var2_meta_est    = round(x$pooled_stats$pooled_var2$meta_est,    3),
+    var2_meta_se     = round(x$pooled_stats$pooled_var2$meta_se,     3),
+    var2_meta_p     = round(x$pooled_stats$pooled_var2$meta_p,     3),
+    var2_avg_est     = round(x$pooled_stats$pooled_var2$avg_est,     3),
+    var2_avg_se      = round(x$pooled_stats$pooled_var2$avg_se,      3),
+    var2_avg_p      = round(x$pooled_stats$pooled_var2$avg_p,      3),
+    var2_meta_estd   = round(x$pooled_stats$pooled_var2$meta_estd,   3),
+    var2_meta_sed    = round(x$pooled_stats$pooled_var2$meta_sed,    3),
+    var2_meta_pd    = round(x$pooled_stats$pooled_var2$meta_pd,    3),
+    var2_avg_estd    = round(x$pooled_stats$pooled_var2$avg_estd,    3),
+    var2_avg_sed     = round(x$pooled_stats$pooled_var2$avg_sed,     3),
+    var2_avg_pd     = round(x$pooled_stats$pooled_var2$avg_pd,     3),
+
+    # ── Interaction (Year × PRPF_lvl) ────────────────
+    int_meta_est    = round(x$pooled_stats$pooled_interaction$meta_est,   3),
+    int_meta_se     = round(x$pooled_stats$pooled_interaction$meta_se,    3),
+    int_meta_p     = round(x$pooled_stats$pooled_interaction$meta_p,    3),
+    int_avg_est     = round(x$pooled_stats$pooled_interaction$avg_est,    3),
+    int_avg_se      = round(x$pooled_stats$pooled_interaction$avg_se,     3),
+    int_avg_p      = round(x$pooled_stats$pooled_interaction$avg_p,     3),
+    int_meta_estd   = round(x$pooled_stats$pooled_interaction$meta_estd,  3),
+    int_meta_sed    = round(x$pooled_stats$pooled_interaction$meta_sed,   3),
+    int_meta_pd    = round(x$pooled_stats$pooled_interaction$meta_pd,   3),
+    int_avg_estd    = round(x$pooled_stats$pooled_interaction$avg_estd,   3),
+    int_avg_sed     = round(x$pooled_stats$pooled_interaction$avg_sed,    3),
+    int_avg_pd     = round(x$pooled_stats$pooled_interaction$avg_pd,    3),
+
+    # ── chisq on partial vs. scalar ─────────────────
+    chisq    = round(x$pooled_stats$chsq,    3),
+    chisq_df =        x$pooled_stats$chsq_dof,
+    chisq_p  = round(x$pooled_stats$chsq_pval,3)
+  )
+}))
+```
+
+```{r}
+kre_yxp<-kre_py%>% 
+  mutate(
+    groupID = interaction(Year,
+                            PRPF_lvl,
+                            sep = ".",      # e.g. "1.p0"
+                            drop = TRUE)) %>% 
+  add_count(groupID, name = "grp_n") %>%   # count rows per category
+  filter(grp_n >= 20) %>%                    # keep only frequent groups
+  dplyr::select(-grp_n) %>%                         # drop the helper column
+  mutate(groupID = forcats::fct_drop(groupID))  # drop now-empty levels
+  
+```
+
+```{r}
+kre_int_yrprpf <- setNames(vector("list", 10), paste0("kre", 1:10, "_int_yr_prpf"))
+
+for (i in 1:10) {
+  kre_int_yrprpf[[i]] <- focal_param_DIF(
+    data       = kre_yxp,
+    group_var  = "groupID",
+    item_lbl   = "kre",
+    item_nmbr  = i,
+    free_param = "intercept")
+}
+
+kre_intercept_yearprpf_df <- do.call(
+  rbind,
+  lapply(kre_int_yrprpf, function(x) as.data.frame(t(x$pooled_stats)))
+)
+rownames(kre_intercept_yearprpf_df) <- NULL   # drop row-names if you like
+```
+
+
+
+```{r}
+kre_load_yrprpf <- setNames(vector("list", 10), paste0("kre", 1:10, "_load_yr_prpf"))
+
+for (i in 1:10) {
+  kre_load_yrprpf[[i]] <- focal_param_DIF(
+    data       = kre_yxp,
+    group_var  = "groupID",
+    item_lbl   = "kre",
+    item_nmbr  = i,
+    free_param = "loading")
+}
+
+kre_load_yearprpf_df <- do.call(
+  rbind,
+  lapply(kre_load_yrprpf, function(x) as.data.frame(t(x$pooled_stats)))
+)
+rownames(kre_load_yearprpf_df) <- NULL   # drop row-names if you like
+```
+
+
+```{r}
+kre_resid_yrprpf <- setNames(vector("list", 10), paste0("kre", 1:10, "_resid_yr_prpf"))
+
+for (i in 1:10) {
+  kre_resid_yrprpf[[i]] <- focal_param_DIF(
+    data       = kre_yxp,
+    group_var  = "groupID",
+    item_lbl   = "kre",
+    item_nmbr  = i,
+    free_param = "residual")
+}
+
+kre_resid_yearprpf_df <- do.call(
+  rbind,
+  lapply(kre_resid_yrprpf, function(x) as.data.frame(t(x$pooled_stats)))
+)
+rownames(kre_resid_yearprpf_df) <- NULL   # drop row-names if you like
+```
+
+
+```{r}
+kre_intercept_year_df %>%
+  rio::export("kre_int_year.xlsx")
+
+kre_load_year_df %>%
+  rio::export("kre_load_year.xlsx")
+
+kre_resid_year_df %>%
+  rio::export("kre_resid_year.xlsx")
+
+kre_int_py_results %>%
+  rio::export("kre_int_ynp_69.xlsx")
+
+kre_load_py_results %>%
+  rio::export("kre_load_ynp_610.xlsx")
+
+kre_resid_py_results %>%
+  rio::export("kre_resid_ynp.xlsx")
+
+kre_intercept_yearprpf_df %>%
+  rio::export("kre_int_yxp.xlsx")
+
+kre_load_yearprpf_df %>%
+  rio::export("kre_load_yxp.xlsx")
+
+kre_resid_yearprpf_df %>%
+  rio::export("kre_resid_yxp.xlsx")
+```
+
+
+```{r}
+{
+  data = kre_py
+  item_nmbr = 1            # e.g. 1
+  item_lbl = "kre"
+  comb_var1 = "Year"
+  comb_var2 = "PRPF_lvl"
+  drop_lvls = 20
+   regexp_e = "^[0-9]+"
+     regexp_r = "^[0-9]+\\."
+  latent_var    = "KRE"
+  constraints   = c("loadings", "intercepts",
+                    "residuals", "lv.variances")
+  std.lv        = TRUE
+  estimator     = "MLR"
+  missing       = "FIML"
+  measurement_model = NULL
+  free_param  ="intercept"
+}
+
+
+
+focal_param_DIF2 <- function(
+  data = kre_py,
+  item_nmbr    = 1,            # e.g. 1
+  item_lbl     = "kre",
+  comb_var1    = "Year",
+  comb_var2    = "PRPF_lvl",
+  drop_lvls    = 20,
+  regexp_e     = "^[0-9]+",
+  regexp_r     = "^[0-9]+\\.",
+  latent_var   = "KRE",
+  constraints  = c("loadings", "intercepts", "residuals", "lv.variances"),
+  free_param   = c("intercept", "loading", "residual", "lv.var"),
+  std.lv       = TRUE,
+  estimator    = "MLR",
+  missing      = "FIML",
+  measurement_model = NULL
+) {
+
+  free_param <- match.arg(free_param)
+  focal_item <- paste0(item_lbl, item_nmbr)
+
+  # 0 ─ Create the interaction grouping (Year × PRPF_lvl), filter out small cells ----
+  data <- data %>%
+    mutate(
+      group_var = interaction(.data[[comb_var1]],
+                              .data[[comb_var2]],
+                              sep = ".",    # e.g. "1.p0", "2.p1", …
+                              drop = TRUE)
+    ) %>%
+    add_count(group_var, name = "grp_n") %>%
+    filter(grp_n >= drop_lvls) %>%
+    dplyr::select(-grp_n) %>%
+    mutate(group_var = forcats::fct_drop(group_var))
+
+  # 1 ─ Build a one‐factor template if none supplied --------------------------------
+  if (is.null(measurement_model)) {
+    items <- paste0(item_lbl, 1:10, collapse = " + ")
+    measurement_model <- sprintf("%s =~ %s", latent_var, items)
+  }
+
+  # 2 ─ Translate free_param into group.partial -------------------------------------
+  group_partial <- switch(
+    free_param,
+    intercept = sprintf("%s ~ 1", focal_item),
+    loading   = sprintf("%s =~ %s", latent_var, focal_item),
+    residual  = sprintf("%s ~~ %s", focal_item, focal_item),
+    lv.var    = sprintf("%s ~~ %s", latent_var, latent_var)
+  )
+
+  if (free_param == "lv.var" && std.lv) {
+    warning("Freeing latent variances requires std.lv = FALSE; changing it.")
+    std.lv <- FALSE
+  }
+
+  # 3 ─ Fit scalar (fully constrained) and partial‐invariance models on the interaction ---
+  scalar_fit <- lavaan::cfa(
+    measurement_model, data = data, group = "group_var",
+    group.equal = constraints,
+    std.lv = std.lv, estimator = estimator, missing = missing
+  )
+
+  partial_fit <- lavaan::cfa(
+    measurement_model, data = data, group = "group_var",
+    group.equal = constraints, group.partial = group_partial,
+    std.lv = std.lv, estimator = estimator, missing = missing
+  )
+
+  # 4 ─ Satorra‐Bentler χ² diff test -------------------------------------------
+  lrt <- lavaan::lavTestLRT(scalar_fit, partial_fit)
+
+  # 5 ─ Helper to grab the focal row from parameterEstimates() -------------------
+  grab_row <- function(fit) {
+    pe <- lavaan::parameterEstimates(fit, standardized = FALSE)
+    dplyr::filter(
+      pe,
+      (free_param == "intercept" & lhs == focal_item & op == "~1") |
+      (free_param == "loading"   & lhs == latent_var  & op == "=~" & rhs == focal_item) |
+      (free_param == "residual"  & lhs == focal_item & op == "~~" & rhs == focal_item) |
+      (free_param == "lv.var"    & lhs == latent_var  & op == "~~" & rhs == latent_var)
+    )
+  }
+
+  tsum <- summary(partial_fit)
+  ssum <- summary(scalar_fit)
+
+  est_part <- grab_row(partial_fit)
+  est_scal <- grab_row(scalar_fit)
+
+  # Attach the group‐labels to each row
+  est_part$label  <- tsum$data$group.label
+  est_scal$label  <- ssum$data$group.label
+
+  # 6 ─ Rename‐group function: if poolvar == comb_var1, extract Year;
+  #    if poolvar == comb_var2, extract PRPF; otherwise keep label “as is.”
+  rename_group <- function(est_df, poolvar) {
+    if (poolvar == comb_var1) {
+      est_df <- est_df %>%
+        mutate(pvar = stringr::str_extract(label, regexp_e))
+    } else if (poolvar == comb_var2) {
+      est_df <- est_df %>%
+        mutate(pvar = stringr::str_replace(label, regexp_r, ""))
+    } else {
+      # “poolvar == interaction”: keep the full label (e.g. "1.p0") as pvar
+      est_df <- est_df %>%
+        mutate(pvar = label)
+    }
+    est_df
+  }
+
+  # 7 ─ Compute a pooled summary given est vs. reference (est_scal) -------------
+  ref_compare <- function(est_df, est_scal_df, poolvar) {
+    est2 <- rename_group(est_df, poolvar)
+    est2 <- dplyr::bind_cols(
+      label = rep(focal_item, length(est2$pvar)),
+      group = est2$pvar,
+      est   = est2$est,     se   = est2$se,
+      cil   = est2$ci.lower, ciu = est2$ci.upper,
+      estr  = est_scal_df$est[1:length(est2$pvar)],
+      ser   = est_scal_df$se[1:length(est2$pvar)],
+      cilr  = est_scal_df$ci.lower[1:length(est2$pvar)],
+      ciur  = est_scal_df$ci.upper[1:length(est2$pvar)]
+    ) %>%
+      mutate(
+        diff    = est - estr,
+        diff_se = sqrt(se^2 + ser^2),
+        weight  = 1 / diff_se^2
+      ) %>%
+      group_by(group) %>%
+      summarise(
+        diff     = weighted.mean(diff, weight),
+        est      = weighted.mean(est, weight),
+        weight   = mean(weight),
+        se       = sqrt(1 / sum(weight)),
+        z        = est / se,
+        pvalue   = 2 * pnorm(-abs(z)),
+        ci.lower = est - qnorm(0.975) * se,
+        ci.upper = est + qnorm(0.975) * se,
+        .groups  = "drop"
+      )
+    est2  # return the per‐group summary
+  }
+
+  # 8 ─ From the “reference‐comparison” table, create pairwise and pooled stats ---
+  pooler <- function(ref_df) {
+    # 8a ─ pooled reference test
+    pooled_est <- with(ref_df, sum(weight * diff) / sum(weight))
+    pooled_se  <- sqrt(1 / sum(ref_df$weight))
+    pooled_z   <- pooled_est / pooled_se
+    pooled_p   <- 2 * pnorm(-abs(pooled_z))
+
+    # 8b ─ all “interaction‐group”‐to‐“interaction‐group” year‐to‐year contrasts
+    groups  <- seq_len(nrow(ref_df))
+    G       <- length(groups)
+    est_mat <- outer(ref_df$est, ref_df$est, `-`)
+    se_mat  <- sqrt(outer(ref_df$se^2, ref_df$se^2, `+`))
+    yr_gap  <- outer(groups, groups, `-`)
+    keep    <- upper.tri(est_mat)
+
+    pairwise_df <- tibble::tibble(
+      grp_hi        = groups[col(est_mat)[keep]],
+      grp_lo        = groups[row(est_mat)[keep]],
+      years_between = yr_gap[keep],
+      diff_scaled   = est_mat[keep] / years_between,
+      se_scaled     = se_mat[keep] / years_between
+    ) %>%
+      mutate(
+        z_scaled = diff_scaled / se_scaled,
+        p_scaled = 2 * pnorm(-abs(z_scaled))
+      )
+
+    # 8c ─ pooled average per‐year change
+    w_pair       <- 1 / pairwise_df$se_scaled^2
+    avg_change_est <- sum(w_pair * pairwise_df$diff_scaled) / sum(w_pair)
+    avg_change_se  <- sqrt(1 / sum(w_pair))
+    avg_change_z   <- avg_change_est / avg_change_se
+    avg_change_p   <- 2 * pnorm(-abs(avg_change_z))
+
+    list(
+      group_labels   = ref_df$group,
+      pooled_est     = pooled_est,
+      pooled_se      = pooled_se,
+      pooled_z_stat  = pooled_z,
+      pooled_p_value = pooled_p,
+      est_mat        = est_mat,
+      se_mat         = se_mat,
+      yr_gap         = yr_gap,
+      pairwise_df    = pairwise_df,
+      w_pair         = w_pair,
+      avg_change_est = avg_change_est,
+      avg_change_se  = avg_change_se,
+      avg_change_z   = avg_change_z,
+      avg_change_p   = avg_change_p
+    )
+  }
+
+  # 9 ─ Wrapper to run ref_compare() + pooler() for a given “poolvar” ------------
+  call_all <- function(est_df, poolvar, est_scal_df) {
+    compare_df   <- ref_compare(est_df, est_scal_df, poolvar)
+    complete_df  <- pooler(compare_df)
+    complete_df$label <- focal_item
+    complete_df
+  }
+
+  # 10 ─ Now compute pooled‐DIF for:
+  #       • comb_var1 (“Year”),
+  #       • comb_var2 (“PRPF_lvl”),
+  #       • “interaction” (i.e. each unique group_var like “1.p0”)
+  var1_results <- call_all(est_part, comb_var1, est_scal)
+  var2_results <- call_all(est_part, comb_var2, est_scal)
+  var3_results <- call_all(est_part, "interaction", est_scal)
+
+  # 11 ─ Return a named list, including LRT and all three pooled‐DIF objects -------
+  list(
+    scalar_fit        = scalar_fit,
+    partial_fit       = partial_fit,
+    LRT               = lrt,
+    pooled_stats      = list(
+      label           = focal_item,
+      pooled_var1     = var1_results,
+      pooled_var2     = var2_results,
+      pooled_interaction = var3_results,
+      chsq            = lrt$`Chisq diff`[2],
+      chsq_dof        = lrt$`Df diff`[2],
+      chsq_pval       = lrt$`Pr(>Chisq)`[2]
+    )
+  )
+}
+
+
+
+
+```
+
+
+```{r}
+comb_var1<-"Year"; comb_var2<-"PRPF_lvl"
+
+kre_pyn<-kre_py %>%
+  filter(!is.na(PRPF)) %>%
+  mutate(group_var = PRPF_lvl)
+
+kre_pynn<-kre_py %>%
+  filter(is.na(PRPF)) %>%
+  mutate(group_var = Year)
+
+kre_pynn<- bind_rows(kre_pynn, kre_pyn)
+
+
+
+```
+
+
+```{r}
+
+
+focal_DIF_addition <- function(
+  data = kre_pynn,
+  item_nmbr    = 1,            # e.g. 1 
+  item_lbl     = "kre",
+  comb_var1    = "Year",
+  comb_var2    = "PRPF_lvl",
+  drop_lvls    = 20, # a category group below 20 members will be dropped
+  regexp_e = "^[0-9]+",
+  regexp_r = "^[0-9]+\\.",
+  latent_var   = "KRE",
+  constraints  = c("loadings", "intercepts", "residuals", "lv.variances"),
+  free_param   = c("intercept", "loading", "residual", "lv.var"),
+  std.lv       = TRUE,
+  estimator    = "MLR",
+  missing      = "FIML",
+  nonrefvect   = NULL ,
+  refgroup     = NULL,
+  measurement_model = NULL #The user can pass their cfa model as this argument
+) {
+  free_param <- match.arg(free_param) # check for which parameters to free up, by default all of them are but the constraints argument changes that
+  focal_item <- paste0(item_lbl, item_nmbr) # make it more generalizable in future iterations
+group_var <- comb_var1 
+  # 0 ─ Create the interaction grouping (Year × PRPF_lvl), filter out small cells ----
+  data <- data %>%
+    add_count(group_var, name = "grp_n") %>%
+    filter(grp_n >= drop_lvls) %>%
+    dplyr::select(-grp_n) %>%
+    mutate(group_var = forcats::fct_drop(group_var))
+
+  # 1 ─ Build a one‐factor template if none supplied --------------------------------
+  if (is.null(measurement_model)) {
+    items <- paste0(item_lbl, 1:10, collapse = " + ")
+    measurement_model <- sprintf("%s =~ %s", latent_var, items)
+  }
+
+  # 2 ─ Translate free_param into group.partial -------------------------------------
+  group_partial <- switch(
+    free_param,
+    intercept = sprintf("%s ~ 1", focal_item),
+    loading   = sprintf("%s =~ %s", latent_var, focal_item),
+    residual  = sprintf("%s ~~ %s", focal_item, focal_item),
+    lv.var    = sprintf("%s ~~ %s", latent_var, latent_var)
+  )
+
+  if (free_param == "lv.var" && std.lv) {
+    warning("Freeing latent variances requires std.lv = FALSE; changing it.")
+    std.lv <- FALSE
+  }
+
+  # 3 ─ Fit scalar (fully constrained) and partial‐invariance models on the interaction ---
+  scalar_fit <- lavaan::cfa(
+    measurement_model, data = data, group = "group_var",
+    group.equal = constraints,
+    std.lv = std.lv, estimator = estimator, missing = missing
+  )
+
+  partial_fit <- lavaan::cfa(
+    measurement_model, data = data, group = "group_var",
+    group.equal = constraints, group.partial = group_partial,
+    std.lv = std.lv, estimator = estimator, missing = missing
+  )
+
+  # 4 ─ Satorra‐Bentler χ² diff test -------------------------------------------
+  lrt <- lavaan::lavTestLRT(scalar_fit, partial_fit)
+
+  # 5 ─ Helper to grab the focal row from parameterEstimates() -------------------
+  grab_row <- function(fit) { #get the freed up parameter estimates
+    pe <- lavaan::parameterEstimates(fit, standardized = FALSE)
+    dplyr::filter(
+      pe,
+      (free_param == "intercept" & lhs == focal_item & op == "~1") |
+      (free_param == "loading"   & lhs == latent_var  & op == "=~" & rhs == focal_item) |
+      (free_param == "residual"  & lhs == focal_item & op == "~~" & rhs == focal_item) |
+      (free_param == "lv.var"    & lhs == latent_var  & op == "~~" & rhs == latent_var)
+    )
+  }
+
+  tsum <- summary(partial_fit)
+  ssum <- summary(scalar_fit)
+
+  est_part <- grab_row(partial_fit)
+  est_scal <- grab_row(scalar_fit)
+
+  # Attach the group‐labels to each row
+  est_part$label  <- tsum$data$group.label
+  est_scal$label  <- ssum$data$group.label
+
+  # 6 ─ Rename‐group function: if poolvar == comb_var1, extract Year;
+  #    if poolvar == comb_var2, extract PRPF; otherwise keep label “as is.”
+  rename_group <- function(est_df, poolvar) {
+    if (poolvar == comb_var1) {
+      est_df <- est_df %>%
+        mutate(pvar = stringr::str_extract(label, regexp_e))
+    } else if (poolvar == comb_var2) {
+      est_df <- est_df %>%
+        mutate(pvar = stringr::str_replace(label, regexp_r, ""))
+    } else {
+      # “poolvar == interaction”: keep the full label (e.g. "1.p0") as pvar
+      est_df <- est_df %>%
+        mutate(pvar = label)
+    }
+    est_df
+  }
+
+  # 7 ─ Compute a pooled summary given est vs. reference (est_scal) -------------
+  ref_compare <- function(est_df, est_scal_df, poolvar) {
+    est2 <- rename_group(est_df, poolvar)
+    est2 <- dplyr::bind_cols(
+      label = rep(focal_item, length(est2$pvar)),
+      group = est2$pvar,
+      est   = est2$est,     se   = est2$se,
+      cil   = est2$ci.lower, ciu = est2$ci.upper,
+      estr  = est_scal_df$est[1:length(est2$pvar)],
+      ser   = est_scal_df$se[1:length(est2$pvar)],
+      cilr  = est_scal_df$ci.lower[1:length(est2$pvar)],
+      ciur  = est_scal_df$ci.upper[1:length(est2$pvar)]
+    ) %>%
+      mutate(
+        diff    = est - estr,
+        diff_se = sqrt(se^2 + ser^2),
+        weight  = 1 / diff_se^2
+      ) %>%
+      group_by(group) %>%
+      summarise(
+        diff     = weighted.mean(diff, weight),
+        est      = weighted.mean(est, weight),
+        weight   = mean(weight),
+        se       = sqrt(1 / sum(weight)),
+        z        = est / se,
+        pvalue   = 2 * pnorm(-abs(z)),
+        ci.lower = est - qnorm(0.975) * se,
+        ci.upper = est + qnorm(0.975) * se,
+        .groups  = "drop"
+      )
+    est2  # return the per‐group summary
+  }
+
+  # 8 ─ From the “reference‐comparison” table, create pairwise and pooled stats ---
+   # ── A: exactly your old “pooled + pairwise + avg” logic ─────────────────
+# ── 1) Default pooling (Year OR PRPF) ────────────────────────────────────
+# ── 1) Default pooling (Year OR PRPF) ────────────────────────────────────
+pool_default <- function(ref_df, poolvar) {
+  # —— PRPF case: compare p0 & pT vs pNA —————————————————————
+  # —— YEAR case (old logic): original pooled + avg_change —————————————————
+  # meta‐analytic pooling over years
+  meta_est <- with(ref_df, sum(weight * diff) / sum(weight))
+  meta_se  <- sqrt(1 / sum(ref_df$weight))
+  meta_z   <- meta_est / meta_se
+  meta_p   <- 2 * pnorm(-abs(meta_z))
+
+  # compute simple average‐per‐year slope from pairwise, 
+  G       <- nrow(ref_df)
+  est_mat <- outer(ref_df$est, ref_df$est, `-`)
+  se_mat  <- sqrt(outer(ref_df$se^2, ref_df$se^2, `+`))
+  gap     <- outer(seq_len(G), seq_len(G), `-`)
+  idx     <- upper.tri(est_mat)
+
+  diffs   <- est_mat[idx] / gap[idx]
+  ses     <- se_mat[idx]  / gap[idx]
+  wts     <- 1 / ses^2
+
+  avg_est <- sum(wts * diffs) / sum(wts)
+  avg_se  <- sqrt(1 / sum(wts))
+  avg_z   <- avg_est / avg_se
+  avg_p   <- 2 * pnorm(-abs(avg_z))
+
+ #pNA indicates the participant was not interviewed
+  #p0 and pT are the participants that were interview
+  # p0 and pT are kept as separate groups to retain variance information for those subgroups
+if (poolvar == comb_var2) {
+    base   <- ref_df %>% filter(group %in% c("p0","pT"))
+    others <- ref_df %>% filter(!group %in% c("p0","pT"))}else if(poolvar == comb_var1){
+    base   <- ref_df %>% filter(group == "1")
+    others <- ref_df %>% filter(group %in% c("2","3","4", "5"))
+    }else{
+    base   <- ref_df %>% filter(group == refgroup)
+    others <- ref_df %>% filter(group %in% nonrefvect)
+    }
+
+    diffd    <- others$diff - base$diff
+    sesd      <- sqrt(others$se^2 + base$se^2)
+    meta_wd  <- 1 / sesd^2
+
+    # meta‐analytic pooled diff, use meta_estd for prpf
+    meta_estd <- sum(diffd * meta_wd) / sum(meta_wd)
+    meta_sed  <- sqrt(1 / sum(meta_wd))
+    meta_zd   <- meta_estd / meta_sed
+    meta_pd   <- 2 * pnorm(-abs(meta_zd))
+
+    # simple average diff
+    avg_estd  <- mean(diffd)
+    avg_sed   <- sqrt(sum(sesd^2)) / length(sesd)
+    avg_zd    <- avg_estd / avg_sed
+    avg_pd    <- 2 * pnorm(-abs(avg_zd))
+list(
+    group_labels   = ref_df$group,
+
+    # meta‐analytic
+    meta_est       = meta_est,
+    meta_se        = meta_se,
+    meta_z         = meta_z,
+    meta_p         = meta_p,
+
+    # simple‐average
+    avg_est        = avg_est,
+    avg_se         = avg_se,
+    avg_z          = avg_z,
+    avg_p          = avg_p,
+    
+    meta_estd = meta_estd, meta_sed = meta_sed, meta_zd = meta_zd, meta_pd = meta_pd,
+      avg_estd  = avg_estd,  avg_sed  = avg_sed,  avg_zd  = avg_zd,  avg_pd  = avg_pd
+  )
+    
+
+}
+
+
+
+# ── 2) Interaction pooling (Year×PRPF → p0/pT vs pNA) ───────────────────
+pool_interaction <- function(ref_df_inter) {
+  # 1) expand to year & prpf
+  df_full <- ref_df_inter %>%
+    mutate(
+      year = as.integer(stringr::str_extract(group, regexp_e)),
+      prpf = stringr::str_replace(group, regexp_e, "")
+    )
+
+  # 2) PRPF‐level pooled & avg slopes
+  prpf_df <- bind_rows(df_full %>%
+   filter(is.na(year)) %>%
+     mutate(diff_pool=diff,
+            se_pool   = sqrt(1 / sum(weight)),
+            avg_pool = diff,
+            se_avg = se) %>%
+     dplyr::select(prpf, diff_pool, se_pool, avg_pool, se_avg)
+     ,
+   df_full %>%
+   arrange(prpf) %>%
+    arrange(year) %>%
+     filter(!prpf %in% c("p0", "pT")) %>%
+    summarise(
+      diff_pool = sum(weight * diff) / sum(weight),
+      se_pool   = sqrt(1 / sum(weight)),
+      avg_pool  = {
+        idx <- which(upper.tri(outer(year,year,`-`)))
+        D   <- outer(est, est, `-`)[idx] / outer(year,year,`-`)[idx]
+        S   <- sqrt(outer(se^2, se^2, `+`))[idx] / outer(year,year,`-`)[idx]
+        w   <- 1 / S^2
+        sum(w * D) / sum(w)
+      },
+      se_avg    = {
+        idx <- which(upper.tri(outer(year,year,`-`)))
+        S   <- sqrt(outer(se^2, se^2, `+`))[idx] / outer(year,year,`-`)[idx]
+        w   <- 1 / S^2
+        sqrt(1 / sum(w))
+      },
+      .groups="drop"
+    )%>%
+     mutate(prpf="pooled")%>%
+     dplyr::select(prpf, diff_pool, se_pool, avg_pool, se_avg)
+  )
+
+  # 3) OVERALL meta‐analytic & simple‐average across all three PRPF levels, meta_est for interaction
+  w_all   <- 1 / prpf_df$se_pool^2
+  meta_est<- sum(prpf_df$diff_pool * w_all) / sum(w_all)
+  meta_se <- sqrt(1 / sum(w_all))
+  meta_z  <- meta_est / meta_se
+  meta_p  <- 2 * pnorm(-abs(meta_z))
+
+  avg_est <- mean(prpf_df$avg_pool)
+  avg_se  <- sqrt(sum(prpf_df$se_avg^2)) / nrow(prpf_df)
+  avg_z   <- avg_est / avg_se
+  avg_p   <- 2 * pnorm(-abs(avg_z))
+
+  # 4) DIFFS vs pNA for the two non-baseline levels
+  ref_pna <- prpf_df %>% filter(!prpf %in% c("p0","pT"))
+  others  <- prpf_df %>% filter(prpf %in% c("p0","pT")) %>%
+    mutate(
+      diff_meta = diff_pool - ref_pna$diff_pool,
+      se_meta   = sqrt(se_pool^2    + ref_pna$se_pool^2),
+
+      diff_avg  = avg_pool  - ref_pna$avg_pool,
+      se_avgd   = sqrt(se_avg^2      + ref_pna$se_avg^2)
+    )
+
+  # 5) meta-analytic & simple-average of those two diffs vs pNA
+  w_meta   <- 1 / others$se_meta^2
+  meta_estd<- sum(others$diff_meta * w_meta) / sum(w_meta)
+  meta_sed <- sqrt(1 / sum(w_meta))
+  meta_zd  <- meta_estd / meta_sed
+  meta_pd  <- 2 * pnorm(-abs(meta_zd))
+
+  avg_estd <- mean(others$diff_avg)
+  avg_sed  <- sqrt(sum(others$se_avgd^2)) / nrow(others)
+  avg_zd   <- avg_estd / avg_sed
+  avg_pd   <- 2 * pnorm(-abs(avg_zd))
+
+  # 6) return all four pairs
+  list(
+    meta_est    = meta_est,
+    meta_se     = meta_se,
+    meta_z      = meta_z,
+    meta_p      = meta_p,
+
+    avg_est     = avg_est,
+    avg_se      = avg_se,
+    avg_z       = avg_z,
+    avg_p       = avg_p,
+
+    meta_estd   = meta_estd,
+    meta_sed    = meta_sed,
+    meta_zd     = meta_zd,
+    meta_pd     = meta_pd,
+
+    avg_estd    = avg_estd,
+    avg_sed     = avg_sed,
+    avg_zd      = avg_zd,
+    avg_pd      = avg_pd
+  )
+}
+
+
+
+  
+  
+  
+  #— quick debug inside focal_param_DIF3() —
+ref_int<-ref_compare(est_part, est_scal, "interaction")
+                   # should be one row per Year×PRPF
+pool_int <- print(pool_interaction(ref_int))  # should be one row per PRPF with both pooled_* and avg_change_*
+#— end debug —
+
+call_all <- function(est_df, poolvar, est_scal_df) {
+  # **Build** the ref‐table for this poolvar
+  ref_df <- ref_compare(est_df, est_scal_df, poolvar)
+
+  if (poolvar == "interaction") {
+    complete_df <- pool_interaction(ref_df)
+  } else {
+    complete_df <- pool_default(ref_df, poolvar)
+  }
+
+  complete_df$label <- focal_item
+  complete_df
+}
+
+    # 10 ─ Now compute pooled‐DIF for:
+  #       • comb_var1 (“Year”),
+  #       • comb_var2 (“PRPF_lvl”),
+  #       • “interaction” (i.e. each unique group_var like “1.p0”)
+var1_results <- call_all(est_part, comb_var1, est_scal)
+var2_results <- call_all(est_part, comb_var2, est_scal)
+var3_results <- call_all(est_part, "interaction", est_scal)
+
+  # 11 ─ Return a named list, including LRT and all three pooled‐DIF objects -------
+  list(
+    scalar_fit        = scalar_fit,
+    partial_fit       = partial_fit,
+    reff              = ref_df,
+    LRT               = lrt,
+    pooled_stats      = list(
+      label           = focal_item,
+      pooled_var1     = var1_results,
+      pooled_var2     = var2_results,
+      pooled_interaction = var3_results,
+      chsq            = lrt$`Chisq diff`[2],
+      chsq_dof        = lrt$`Df diff`[2],
+      chsq_pval       = lrt$`Pr(>Chisq)`[2]
+    )
+  )
+}
+```
+
+
+
+```{r}
+# Run DIF for kre1 through kre10 and store results neatly
+kre_int_ppy <- lapply(1:10, function(i) {
+  focal_DIF_addition(
+    data       = kre_pynn,
+    comb_var1  = "Year",
+    comb_var2  = "PRPF_lvl",
+    item_lbl   = "kre",
+    item_nmbr  = i,
+    free_param = "intercept"
+  )
+})
+
+
+
+kre_int_ppy_results <- do.call(rbind, lapply(kre_int_ppy, function(x) {
+  data.frame(
+    label = x$pooled_stats$label,
+
+    # ── Year (comb_var1) ──────────────────────────────
+    var1_meta_est    = round(x$pooled_stats$pooled_var1$meta_est,    3),
+    var1_meta_se     = round(x$pooled_stats$pooled_var1$meta_se,     3),
+    var1_meta_p     = round(x$pooled_stats$pooled_var1$meta_p,     3),
+    var1_avg_est     = round(x$pooled_stats$pooled_var1$avg_est,     3),
+    var1_avg_se      = round(x$pooled_stats$pooled_var1$avg_se,      3),
+    var1_avg_p      = round(x$pooled_stats$pooled_var1$avg_p,      3),
+    var1_meta_estd   = round(x$pooled_stats$pooled_var1$meta_estd,   3),
+    var1_meta_sed    = round(x$pooled_stats$pooled_var1$meta_sed,    3),
+    var1_meta_pd    = round(x$pooled_stats$pooled_var1$meta_pd,    3),
+    var1_avg_estd    = round(x$pooled_stats$pooled_var1$avg_estd,    3),
+    var1_avg_sed     = round(x$pooled_stats$pooled_var1$avg_sed,     3),
+    var1_avg_pd     = round(x$pooled_stats$pooled_var1$avg_pd,     3),
+
+    # ── PRPF_lvl (comb_var2) ─────────────────────────
+    var2_meta_est    = round(x$pooled_stats$pooled_var2$meta_est,    3),
+    var2_meta_se     = round(x$pooled_stats$pooled_var2$meta_se,     3),
+    var2_meta_p     = round(x$pooled_stats$pooled_var2$meta_p,     3),
+    var2_avg_est     = round(x$pooled_stats$pooled_var2$avg_est,     3),
+    var2_avg_se      = round(x$pooled_stats$pooled_var2$avg_se,      3),
+    var2_avg_p      = round(x$pooled_stats$pooled_var2$avg_p,      3),
+    var2_meta_estd   = round(x$pooled_stats$pooled_var2$meta_estd,   3),
+    var2_meta_sed    = round(x$pooled_stats$pooled_var2$meta_sed,    3),
+    var2_meta_pd    = round(x$pooled_stats$pooled_var2$meta_pd,    3),
+    var2_avg_estd    = round(x$pooled_stats$pooled_var2$avg_estd,    3),
+    var2_avg_sed     = round(x$pooled_stats$pooled_var2$avg_sed,     3),
+    var2_avg_pd     = round(x$pooled_stats$pooled_var2$avg_pd,     3),
+
+    # ── Interaction (Year × PRPF_lvl) ────────────────
+    int_meta_est    = round(x$pooled_stats$pooled_interaction$meta_est,   3),
+    int_meta_se     = round(x$pooled_stats$pooled_interaction$meta_se,    3),
+    int_meta_p     = round(x$pooled_stats$pooled_interaction$meta_p,    3),
+    int_avg_est     = round(x$pooled_stats$pooled_interaction$avg_est,    3),
+    int_avg_se      = round(x$pooled_stats$pooled_interaction$avg_se,     3),
+    int_avg_p      = round(x$pooled_stats$pooled_interaction$avg_p,     3),
+    int_meta_estd   = round(x$pooled_stats$pooled_interaction$meta_estd,  3),
+    int_meta_sed    = round(x$pooled_stats$pooled_interaction$meta_sed,   3),
+    int_meta_pd    = round(x$pooled_stats$pooled_interaction$meta_pd,   3),
+    int_avg_estd    = round(x$pooled_stats$pooled_interaction$avg_estd,   3),
+    int_avg_sed     = round(x$pooled_stats$pooled_interaction$avg_sed,    3),
+    int_avg_pd     = round(x$pooled_stats$pooled_interaction$avg_pd,    3),
+
+    # ── chisq on partial vs. scalar ─────────────────
+    chisq    = round(x$pooled_stats$chsq,    3),
+    chisq_df =        x$pooled_stats$chsq_dof,
+    chisq_p  = round(x$pooled_stats$chsq_pval,3)
+  )
+}))
+
+kre_int_ppy_results %>%
+  write.csv("int_pny.csv")
+```
+
+
+```{r}
+# Run DIF for kre1 through kre10 and store results neatly
+kre_load_ppy <- lapply(1:10, function(i) {
+  focal_DIF_addition(
+    data       = kre_pynn,
+    comb_var1  = "Year",
+    comb_var2  = "PRPF_lvl",
+    item_lbl   = "kre",
+    item_nmbr  = i,
+    free_param = "loading"
+  )
+})
+
+kre_load_ppy_results <- do.call(rbind, lapply(kre_load_ppy, function(x) {
+  data.frame(
+    label = x$pooled_stats$label,
+
+    # ── Year (comb_var1) ──────────────────────────────
+    var1_meta_est    = round(x$pooled_stats$pooled_var1$meta_est,    3),
+    var1_meta_se     = round(x$pooled_stats$pooled_var1$meta_se,     3),
+    var1_meta_p     = round(x$pooled_stats$pooled_var1$meta_p,     3),
+    var1_avg_est     = round(x$pooled_stats$pooled_var1$avg_est,     3),
+    var1_avg_se      = round(x$pooled_stats$pooled_var1$avg_se,      3),
+    var1_avg_p      = round(x$pooled_stats$pooled_var1$avg_p,      3),
+    var1_meta_estd   = round(x$pooled_stats$pooled_var1$meta_estd,   3),
+    var1_meta_sed    = round(x$pooled_stats$pooled_var1$meta_sed,    3),
+    var1_meta_pd    = round(x$pooled_stats$pooled_var1$meta_pd,    3),
+    var1_avg_estd    = round(x$pooled_stats$pooled_var1$avg_estd,    3),
+    var1_avg_sed     = round(x$pooled_stats$pooled_var1$avg_sed,     3),
+    var1_avg_pd     = round(x$pooled_stats$pooled_var1$avg_pd,     3),
+
+    # ── PRPF_lvl (comb_var2) ─────────────────────────
+    var2_meta_est    = round(x$pooled_stats$pooled_var2$meta_est,    3),
+    var2_meta_se     = round(x$pooled_stats$pooled_var2$meta_se,     3),
+    var2_meta_p     = round(x$pooled_stats$pooled_var2$meta_p,     3),
+    var2_avg_est     = round(x$pooled_stats$pooled_var2$avg_est,     3),
+    var2_avg_se      = round(x$pooled_stats$pooled_var2$avg_se,      3),
+    var2_avg_p      = round(x$pooled_stats$pooled_var2$avg_p,      3),
+    var2_meta_estd   = round(x$pooled_stats$pooled_var2$meta_estd,   3),
+    var2_meta_sed    = round(x$pooled_stats$pooled_var2$meta_sed,    3),
+    var2_meta_pd    = round(x$pooled_stats$pooled_var2$meta_pd,    3),
+    var2_avg_estd    = round(x$pooled_stats$pooled_var2$avg_estd,    3),
+    var2_avg_sed     = round(x$pooled_stats$pooled_var2$avg_sed,     3),
+    var2_avg_pd     = round(x$pooled_stats$pooled_var2$avg_pd,     3),
+
+    # ── Interaction (Year × PRPF_lvl) ────────────────
+    int_meta_est    = round(x$pooled_stats$pooled_interaction$meta_est,   3),
+    int_meta_se     = round(x$pooled_stats$pooled_interaction$meta_se,    3),
+    int_meta_p     = round(x$pooled_stats$pooled_interaction$meta_p,    3),
+    int_avg_est     = round(x$pooled_stats$pooled_interaction$avg_est,    3),
+    int_avg_se      = round(x$pooled_stats$pooled_interaction$avg_se,     3),
+    int_avg_p      = round(x$pooled_stats$pooled_interaction$avg_p,     3),
+    int_meta_estd   = round(x$pooled_stats$pooled_interaction$meta_estd,  3),
+    int_meta_sed    = round(x$pooled_stats$pooled_interaction$meta_sed,   3),
+    int_meta_pd    = round(x$pooled_stats$pooled_interaction$meta_pd,   3),
+    int_avg_estd    = round(x$pooled_stats$pooled_interaction$avg_estd,   3),
+    int_avg_sed     = round(x$pooled_stats$pooled_interaction$avg_sed,    3),
+    int_avg_pd     = round(x$pooled_stats$pooled_interaction$avg_pd,    3),
+
+    # ── chisq on partial vs. scalar ─────────────────
+    chisq    = round(x$pooled_stats$chsq,    3),
+    chisq_df =        x$pooled_stats$chsq_dof,
+    chisq_p  = round(x$pooled_stats$chsq_pval,3)
+  )
+}))
+
+
+kre_load_ppy_results %>%
+  write.csv("factor_pny.csv")
+#colnames(kre_int_py_results)<-c("item", "year_est", "year_se", "year_p","prpf_est", "prpf_se", "prpf_p", "Chi_sq", "df", "Chi.pval")
+
+#colnames(kre_load_py_results)<-c("item", "year_est", "year_se", "year_p","prpf_est", "prpf_se", "prpf_p", "Chi_sq", "df", "Chi.pval")
+```
+
+
+```{r}
+kre_resid_ppy <- lapply(1:10, function(i) {
+  focal_DIF_addition(
+    data       = kre_pynn,
+    comb_var1  = "Year",
+    comb_var2  = "PRPF_lvl",
+    item_lbl   = "kre",
+    item_nmbr  = i,
+    free_param = "residual"
+  )
+})
+
+kre_resid_ppy_results <- do.call(rbind, lapply(kre_resid_ppy, function(x) {
+  data.frame(
+    label = x$pooled_stats$label,
+
+    # ── Year (comb_var1) ──────────────────────────────
+    var1_meta_est    = round(x$pooled_stats$pooled_var1$meta_est,    3),
+    var1_meta_se     = round(x$pooled_stats$pooled_var1$meta_se,     3),
+    var1_meta_p     = round(x$pooled_stats$pooled_var1$meta_p,     3),
+    var1_avg_est     = round(x$pooled_stats$pooled_var1$avg_est,     3),
+    var1_avg_se      = round(x$pooled_stats$pooled_var1$avg_se,      3),
+    var1_avg_p      = round(x$pooled_stats$pooled_var1$avg_p,      3),
+    var1_meta_estd   = round(x$pooled_stats$pooled_var1$meta_estd,   3),
+    var1_meta_sed    = round(x$pooled_stats$pooled_var1$meta_sed,    3),
+    var1_meta_pd    = round(x$pooled_stats$pooled_var1$meta_pd,    3),
+    var1_avg_estd    = round(x$pooled_stats$pooled_var1$avg_estd,    3),
+    var1_avg_sed     = round(x$pooled_stats$pooled_var1$avg_sed,     3),
+    var1_avg_pd     = round(x$pooled_stats$pooled_var1$avg_pd,     3),
+
+    # ── PRPF_lvl (comb_var2) ─────────────────────────
+    var2_meta_est    = round(x$pooled_stats$pooled_var2$meta_est,    3),
+    var2_meta_se     = round(x$pooled_stats$pooled_var2$meta_se,     3),
+    var2_meta_p     = round(x$pooled_stats$pooled_var2$meta_p,     3),
+    var2_avg_est     = round(x$pooled_stats$pooled_var2$avg_est,     3),
+    var2_avg_se      = round(x$pooled_stats$pooled_var2$avg_se,      3),
+    var2_avg_p      = round(x$pooled_stats$pooled_var2$avg_p,      3),
+    var2_meta_estd   = round(x$pooled_stats$pooled_var2$meta_estd,   3),
+    var2_meta_sed    = round(x$pooled_stats$pooled_var2$meta_sed,    3),
+    var2_meta_pd    = round(x$pooled_stats$pooled_var2$meta_pd,    3),
+    var2_avg_estd    = round(x$pooled_stats$pooled_var2$avg_estd,    3),
+    var2_avg_sed     = round(x$pooled_stats$pooled_var2$avg_sed,     3),
+    var2_avg_pd     = round(x$pooled_stats$pooled_var2$avg_pd,     3),
+
+    # ── Interaction (Year × PRPF_lvl) ────────────────
+    int_meta_est    = round(x$pooled_stats$pooled_interaction$meta_est,   3),
+    int_meta_se     = round(x$pooled_stats$pooled_interaction$meta_se,    3),
+    int_meta_p     = round(x$pooled_stats$pooled_interaction$meta_p,    3),
+    int_avg_est     = round(x$pooled_stats$pooled_interaction$avg_est,    3),
+    int_avg_se      = round(x$pooled_stats$pooled_interaction$avg_se,     3),
+    int_avg_p      = round(x$pooled_stats$pooled_interaction$avg_p,     3),
+    int_meta_estd   = round(x$pooled_stats$pooled_interaction$meta_estd,  3),
+    int_meta_sed    = round(x$pooled_stats$pooled_interaction$meta_sed,   3),
+    int_meta_pd    = round(x$pooled_stats$pooled_interaction$meta_pd,   3),
+    int_avg_estd    = round(x$pooled_stats$pooled_interaction$avg_estd,   3),
+    int_avg_sed     = round(x$pooled_stats$pooled_interaction$avg_sed,    3),
+    int_avg_pd     = round(x$pooled_stats$pooled_interaction$avg_pd,    3),
+
+    # ── chisq on partial vs. scalar ─────────────────
+    chisq    = round(x$pooled_stats$chsq,    3),
+    chisq_df =        x$pooled_stats$chsq_dof,
+    chisq_p  = round(x$pooled_stats$chsq_pval,3)
+  )
+}))
+
+kre_resid_ppy_results %>%
+  write.csv("resid_pny.csv")
+```
+
+```{r}
+save(kre_int_ppy, kre_int_prpf, kre_int_yr, kre_int_yrprpf,
+     kre_load_ppy, kre_load_prpf, kre_load_yr, kre_load_yrprpf,
+     kre_resid_ppy, kre_resid_prpf, kre_resid_yr, kre_resid_yrprpf,file = "mnlfa_lists_kre_073025.rda")
+```
+
+
+```{r}
+save(kre_int_ppy_results, kre_int_py_results, kre_intercept_year_df, kre_intercept_yearprpf_df,
+     kre_load_ppy_results, kre_load_py_results, kre_load_year_df, kre_load_yearprpf_df,
+     kre_resid_ppy_results, kre_resid_py_results, kre_resid_year_df, kre_resid_yearprpf_df,file = "mnlfa_dataframes_kre_073025.rda")
+```
+
+```{r}
+kre_intercept_yr_values <- do.call(
+  rbind,
+  lapply(kre_int_yr, function(x) as.data.frame(x$compare_df))
+)
+
+
+kre_intercept_yr_values$group <- as.numeric(as.character(kre_intercept_yr_values$group))
+
+
+kre_intercept_yn_values <- do.call(
+  rbind,
+  lapply(kre_int_ppy, function(x) as.data.frame(x$reff))
+)
+
+labels <- rep(paste0("kre", 1:10), each = 5)
+kre_intercept_yn<-kre_intercept_yn_values %>%
+  filter(group %in% c("1","2","3","4","5")) %>%
+  mutate(label = labels)
+
+kre_intercept_yn$group <- as.numeric(as.character(kre_intercept_yn$group))
+
+```
+
+```{r}
+kre_intercept_yr_values$Type <- "yr"
+kre_intercept_yn$Type <- "yn"
+
+# Make sure columns match
+kre_intercept_yn <- kre_intercept_yn %>%
+  dplyr::select(label, group, est, se, diff, weight, Type)
+kre_intercept_yr_values <- kre_intercept_yr_values %>%
+  dplyr::select(label, group, est, se, diff, weight, Type)
+
+# Combine both data frames
+combined <- bind_rows(kre_intercept_yr_values, kre_intercept_yn)
+
+# Plot: two lines, each for a different Type, in each facet
+ggplot(combined, aes(x = group, y = est, linetype = Type, color = Type)) +
+  geom_point(size = 2) +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_wrap(~ label) +
+  labs(x = "Group", y = "Estimate", title = "Linear Fit by Item and Type") +
+  theme_bw() +
+  theme(strip.text = element_text(size = 12))
+```
+
+```{r}
+kre_load_yr_values <- do.call(
+  rbind,
+  lapply(kre_load_yr, function(x) as.data.frame(x$compare_df))
+)
+
+kre_load_yr_values$Type <- "yr"
+
+kre_load_yr_values <- kre_load_yr_values %>%
+  mutate(label = labels,
+         group = as.numeric(as.character(group)),
+         estw = weighted.mean(est, weight)) %>%
+  dplyr::select(label, group, est, weight, Type)
+```
+
+
+```{r}
+kre_load_yn_values <- do.call(
+  rbind,
+  lapply(kre_load_prpf, function(x) as.data.frame(x$reff))
+)
+
+
+
+# Extract leading group number
+kre_load_yn_values$group_num <- as.integer(str_extract(kre_load_yn_values$group, "^[0-9]+"))
+
+# Detect reset: group_num < previous group_num (so the sequence "repeats")
+reset <- c(TRUE, diff(kre_load_yn_values$group_num) < 0)
+
+# Cumulative sum of resets gives block number
+block_id <- cumsum(reset)
+kre_load_yn_values$Type <- "yn"
+# Assign kre1-kre10 labels, recycling if needed
+kre_load_yn_values$label <- paste0("kre", ((block_id - 1) %% 10) + 1)
+kre_load_yn_values<-kre_load_yn_values %>%
+  mutate(group = group_num,
+         group = as.numeric(as.character(group))) %>%
+  dplyr::select(label, group, est, weight, Type)
+
+kreln1<-kre_load_yn_values %>%
+  filter()
+
+```
+
+```{r}
+combined <- bind_rows(kre_load_yr_values, kre_load_yn_values)
+
+# Plot: two lines, each for a different Type, in each facet
+ggplot(combined, aes(x = group, y = est, linetype = Type, color = Type) )+
+  geom_smooth(method = "lm", se=FALSE) +
+  facet_wrap(~ label) +
+  labs(x = "Group", y = "Estimate", title = "Linear Fit by Item and Type") +
+  theme_bw() +
+  theme(strip.text = element_text(size = 12))
+```
+
+
+
+
+```{r}
+# Plot: two lines, each for a different Type, in each facet
+ggplot(combined, aes(x = group, y = est, linetype = Type, color = Type)) +
+  geom_point(size = 2) +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_wrap(~ label) +
+  labs(x = "Group", y = "Estimate", title = "Linear Fit by Item and Type") +
+  theme_bw() +
+  theme(strip.text = element_text(size = 12))
+```
+```{r}
+(kre_load_yrprpf)
+```
+
