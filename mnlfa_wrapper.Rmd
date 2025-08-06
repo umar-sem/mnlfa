@@ -20,7 +20,7 @@ library(tidyverse)
 library(devtools)
 library(furniture)
 library(dplyr)
-#library(EFAtools)
+
 library(lavaan)
 #library(MplusAutomation)
 #library(ltm)
